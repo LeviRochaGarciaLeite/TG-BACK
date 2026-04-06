@@ -8,7 +8,10 @@ Endpoints:
   POST /colaborador/<id>/ajuste                — Insere ajuste manual de ponto
   GET  /pendencias                             — Lista solicitações pendentes
   POST /pendencias/<id_registro>/avaliar       — Aprova ou recusa uma solicitação
+<<<<<<< HEAD
   PUT  /colaborador/<id>/perfil                — Altera o perfil do colaborador
+=======
+>>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
 """
 
 import logging
@@ -16,7 +19,11 @@ from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Blueprint, request, jsonify
+<<<<<<< HEAD
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
+=======
+from flask_jwt_extended import jwt_required, get_jwt
+>>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
 
 from ..models import db, Usuario, RegistroPonto
 
@@ -240,6 +247,7 @@ def avaliar_pendencia(id_registro: int):
         "mensagem":    mensagem,
         "novo_status": registro.status,
     }), 200
+<<<<<<< HEAD
 
 
 # ── Editar Perfil do Colaborador (Gestor) ──────────────────────────────────
@@ -274,3 +282,5 @@ def gestor_editar_perfil(id_colaborador: int):
         "nome": colaborador.nome,
         "foto_perfil": colaborador.foto_perfil
     }), 200
+=======
+>>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
