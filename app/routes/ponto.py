@@ -1,129 +1,236 @@
+"""
+Rotas de ponto eletrônico — /api/ponto
+Endpoints:
+  POST /registrar         — Bate o ponto (entrada, pausa_inicio, pausa_fim, saida)
+  GET  /historico         — Histórico do usuário logado (com paginação)
+  GET  /status-atual      — Estado atual da jornada (idle | working | paused | done)
+  POST /solicitar-ajuste  — Solicita ajuste manual para aprovação do gestor
+"""
+
+import logging
+from datetime import datetime, timezone, date
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.models import db, RegistroPonto
-from datetime import datetime
 
-# Criação do Blueprint para as rotas de ponto
-ponto_bp = Blueprint('ponto', __name__)
+from ..models import db, RegistroPonto
 
-@ponto_bp.route('/registrar', methods=['POST'])
-@jwt_required() # <--- O SEGURANÇA DA PORTA! Exige o Token JWT no cabeçalho
-def registrar_ponto():
-    # 1. Quem está batendo o ponto? O JWT extrai o ID do usuário de forma segura
-    usuario_id = get_jwt_identity()
-    
-    # 2. O que ele está enviando? (entrada, pausa_inicio, pausa_fim ou saida)
-    dados = request.get_json()
-    if not dados or not dados.get('tipo_registro'):
-         return jsonify({"erro": "O tipo_registro é obrigatório"}), 400
-         
-    tipo = dados.get('tipo_registro')
-    
-    # Validação de segurança para aceitar apenas os 4 tipos definidos na sua regra de negócio
-    tipos_validos = ['entrada', 'pausa_inicio', 'pausa_fim', 'saida']
-    if tipo not in tipos_validos:
-        return jsonify({"erro": f"Tipo inválido. Escolha entre: {', '.join(tipos_validos)}"}), 400
-        
-    # 3. Pegando dados extras de auditoria (IP e Navegador/Dispositivo)
-    ip_cliente = request.remote_addr
-    dispositivo_info = request.headers.get('User-Agent', 'Desconhecido')
-    
-    # 4. Criando e salvando o registro no banco de dados
-    novo_registro = RegistroPonto(
-        usuario_id=usuario_id,
-        tipo_registro=tipo,
-        ip_origem=ip_cliente,
-        dispositivo=dispositivo_info
-        # O timestamp já é gerado automaticamente pelo default=datetime.utcnow no models.py
+ponto_bp = Blueprint("ponto", __name__)
+logger = logging.getLogger(__name__)
+
+
+# ── Helper ─────────────────────────────────────────────────────────────────
+
+def _registros_de_hoje(usuario_id: int):
+    """Retorna os registros de ponto do dia atual para o usuário."""
+    hoje_inicio = datetime.combine(date.today(), datetime.min.time()).replace(tzinfo=timezone.utc)
+    return (
+        RegistroPonto.query
+        .filter(
+            RegistroPonto.usuario_id == usuario_id,
+            RegistroPonto.timestamp >= hoje_inicio,
+            RegistroPonto.status.in_(["valido", "ajustado"]),
+        )
+        .order_by(RegistroPonto.timestamp.asc())
+        .all()
     )
-    
-    db.session.add(novo_registro)
+
+
+def _estado_jornada(registros: list) -> str:
+    """
+    Deriva o estado da jornada a partir da lista de registros do dia.
+    Retorna: 'idle' | 'working' | 'paused' | 'done'
+    """
+    if not registros:
+        return "idle"
+
+    ultimo_tipo = registros[-1].tipo_registro
+
+    return {
+        "entrada":      "working",
+        "pausa_inicio": "paused",
+        "pausa_fim":    "working",
+        "saida":        "done",
+    }.get(ultimo_tipo, "idle")
+
+
+def _transicao_valida(estado_atual: str, novo_tipo: str) -> bool:
+    """
+    Garante que a sequência de registros é lógica.
+    Ex: não pode iniciar pausa sem estar trabalhando.
+    """
+    transicoes_permitidas = {
+        "idle":    ["entrada"],
+        "working": ["pausa_inicio", "saida"],
+        "paused":  ["pausa_fim"],
+        "done":    [],          # Jornada encerrada — nenhuma ação válida
+    }
+    return novo_tipo in transicoes_permitidas.get(estado_atual, [])
+
+
+# ── Registrar ponto ────────────────────────────────────────────────────────
+
+@ponto_bp.route("/registrar", methods=["POST"])
+@jwt_required()
+def registrar_ponto():
+    usuario_id = get_jwt_identity()
+    dados = request.get_json(silent=True)
+
+    if not dados or not dados.get("tipo_registro"):
+        return jsonify({"erro": "O campo tipo_registro é obrigatório."}), 400
+
+    tipo = dados["tipo_registro"]
+
+    if tipo not in RegistroPonto.TIPOS_VALIDOS:
+        return jsonify({
+            "erro": f"Tipo inválido. Use: {', '.join(RegistroPonto.TIPOS_VALIDOS)}."
+        }), 400
+
+    # ── Validação de sequência lógica ──────────────────────────────────────
+    registros_hoje = _registros_de_hoje(usuario_id)
+    estado_atual   = _estado_jornada(registros_hoje)
+
+    if not _transicao_valida(estado_atual, tipo):
+        return jsonify({
+            "erro": f"Ação '{tipo}' não permitida no estado atual '{estado_atual}'."
+        }), 409
+
+    # ── Persiste o registro ────────────────────────────────────────────────
+    novo = RegistroPonto(
+        usuario_id    = usuario_id,
+        tipo_registro = tipo,
+        ip_origem     = request.remote_addr,
+        dispositivo   = request.headers.get("User-Agent", "")[:255],
+        status        = "valido",
+    )
+    db.session.add(novo)
     db.session.commit()
-    
+
+    logger.info(f"Ponto registrado: usuario_id={usuario_id} tipo={tipo}")
+
     return jsonify({
-        "mensagem": f"Ponto de {tipo} registrado com sucesso!",
-        "horario_servidor": datetime.utcnow().isoformat()
+        "mensagem":        f"Ponto '{tipo}' registrado com sucesso.",
+        "horario_servidor": novo.timestamp.isoformat(),
+        "novo_estado":     _estado_jornada(_registros_de_hoje(usuario_id)),
     }), 201
 
-    # ... (código anterior da rota /registrar) ...
 
-@ponto_bp.route('/historico', methods=['GET'])
+# ── Histórico ──────────────────────────────────────────────────────────────
+
+@ponto_bp.route("/historico", methods=["GET"])
 @jwt_required()
 def historico_ponto():
-    # 1. Descobre quem é o usuário logado
     usuario_id = get_jwt_identity()
-    
-    # 2. Busca todos os registros desse usuário no banco, ordenados do mais recente pro mais antigo
-    registros = RegistroPonto.query.filter_by(usuario_id=usuario_id).order_by(RegistroPonto.timestamp.desc()).all()
-    
-    # 3. Formata os dados para enviar como JSON
-    lista_registros = []
-    for reg in registros:
-        lista_registros.append({
-            "id": reg.id,
-            "tipo": reg.tipo_registro,
-            "horario": reg.timestamp.isoformat(),
-            "status": reg.status
-        })
-        
+
+    # Paginação simples: ?pagina=1&por_pagina=50
+    pagina     = max(1, request.args.get("pagina", 1, type=int))
+    por_pagina = min(100, request.args.get("por_pagina", 50, type=int))
+
+    paginado = (
+        RegistroPonto.query
+        .filter_by(usuario_id=usuario_id)
+        .order_by(RegistroPonto.timestamp.desc())
+        .paginate(page=pagina, per_page=por_pagina, error_out=False)
+    )
+
     return jsonify({
-        "total_registros": len(lista_registros),
-        "historico": lista_registros
+        "pagina":          paginado.page,
+        "por_pagina":      paginado.per_page,
+        "total_registros": paginado.total,
+        "total_paginas":   paginado.pages,
+        "historico":       [r.to_dict() for r in paginado.items],
     }), 200
 
-# ... (código anterior) ...
 
-@ponto_bp.route('/solicitar-ajuste', methods=['POST'])
-@jwt_required()
-def solicitar_ajuste():
-    # 1. Identifica o funcionário logado
-    usuario_id = get_jwt_identity()
-    
-    # 2. Pega os dados que o funcionário enviou no app
-    dados = request.get_json()
-    tipo = dados.get('tipo_registro')
-    horario_str = dados.get('horario')
-    motivo = dados.get('motivo', 'Esqueci de registrar no horário correto.')
-    
-    if not tipo or not horario_str:
-        return jsonify({"erro": "tipo_registro e horario são obrigatórios"}), 400
-        
-    try:
-        horario_ajuste = datetime.fromisoformat(horario_str)
-    except ValueError:
-        return jsonify({"erro": "Formato de data inválido. Use ISO 8601"}), 400
-        
-    # 3. Salva no banco com o status de PENDENTE
-    novo_registro = RegistroPonto(
-        usuario_id=usuario_id,
-        tipo_registro=tipo,
-        timestamp=horario_ajuste,
-        ip_origem=request.remote_addr,
-        dispositivo=f"Solicitação via App | Motivo: {motivo}",
-        status="pendente_ajuste" # <--- O pulo do gato!
-    )
-    
-    db.session.add(novo_registro)
-    db.session.commit()
-    
-    return jsonify({
-        "mensagem": "Solicitação de ajuste enviada para o gestor com sucesso!",
-        "status": "pendente_ajuste"
-    }), 201
+# ── Status atual ───────────────────────────────────────────────────────────
 
-    # No app/routes/ponto.py
-@ponto_bp.route('/status-atual', methods=['GET'])
+@ponto_bp.route("/status-atual", methods=["GET"])
 @jwt_required()
 def status_atual():
-    user_id = get_jwt_identity()
-    # Busca a última batida de hoje
-    ultimo = RegistroPonto.query.filter_by(usuario_id=user_id).order_by(RegistroPonto.timestamp.desc()).first()
-    
-    if not ultimo or ultimo.tipo_registro == 'saida':
-        return jsonify({"status": "desconectado"}), 200
-        
+    """
+    Retorna o estado da jornada do dia atual com cálculo real de tempo.
+    O front-end usa este endpoint para restaurar o estado após reload.
+    """
+    usuario_id     = get_jwt_identity()
+    registros_hoje = _registros_de_hoje(usuario_id)
+    estado         = _estado_jornada(registros_hoje)
+
+    if not registros_hoje:
+        return jsonify({"estado": "idle"}), 200
+
+    # ── Calcula tempos ─────────────────────────────────────────────────────
+    agora          = datetime.now(timezone.utc)
+    inicio         = registros_hoje[0].timestamp
+    conectado_seg  = int((agora - inicio).total_seconds())
+
+    # Soma duração de todas as pausas
+    pausa_seg = 0
+    inicio_pausa = None
+    for reg in registros_hoje:
+        if reg.tipo_registro == "pausa_inicio":
+            inicio_pausa = reg.timestamp
+        elif reg.tipo_registro == "pausa_fim" and inicio_pausa:
+            pausa_seg += int((reg.timestamp - inicio_pausa).total_seconds())
+            inicio_pausa = None
+
+    # Pausa em andamento
+    if estado == "paused" and inicio_pausa:
+        pausa_seg += int((agora - inicio_pausa).total_seconds())
+
+    trabalhado_seg = max(0, conectado_seg - pausa_seg)
+    fim = registros_hoje[-1].timestamp if estado == "done" else None
+
     return jsonify({
-        "status": "conectado",
-        "ultimo_tipo": ultimo.tipo_registro,
-        "segundos_desde_inicio": 0 # Aqui você poderia calcular a diferença de tempo
+        "estado":          estado,
+        "inicio":          inicio.isoformat(),
+        "fim":             fim.isoformat() if fim else None,
+        "conectado_seg":   conectado_seg,
+        "pausa_seg":       pausa_seg,
+        "trabalhado_seg":  trabalhado_seg,
+        "registros_hoje":  [r.to_dict() for r in registros_hoje],
     }), 200
+
+
+# ── Solicitar ajuste ───────────────────────────────────────────────────────
+
+@ponto_bp.route("/solicitar-ajuste", methods=["POST"])
+@jwt_required()
+def solicitar_ajuste():
+    usuario_id = get_jwt_identity()
+    dados = request.get_json(silent=True)
+
+    tipo       = dados.get("tipo_registro") if dados else None
+    horario_str = dados.get("horario")     if dados else None
+    observacao  = dados.get("observacao", "Sem motivo informado.")[:500]
+
+    if not tipo or not horario_str:
+        return jsonify({"erro": "tipo_registro e horario são obrigatórios."}), 400
+
+    if tipo not in RegistroPonto.TIPOS_VALIDOS:
+        return jsonify({"erro": "Tipo de registro inválido."}), 400
+
+    try:
+        horario = datetime.fromisoformat(horario_str)
+        # Garante timezone UTC se não informado
+        if horario.tzinfo is None:
+            horario = horario.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return jsonify({"erro": "Formato de data inválido. Use ISO 8601."}), 400
+
+    registro = RegistroPonto(
+        usuario_id    = usuario_id,
+        tipo_registro = tipo,
+        timestamp     = horario,
+        ip_origem     = request.remote_addr,
+        dispositivo   = "Solicitação via App",
+        status        = "pendente_ajuste",
+        observacao    = observacao,
+    )
+    db.session.add(registro)
+    db.session.commit()
+
+    logger.info(f"Ajuste solicitado: usuario_id={usuario_id} tipo={tipo} horario={horario}")
+
+    return jsonify({
+        "mensagem": "Solicitação de ajuste enviada para aprovação do gestor.",
+        "status":   "pendente_ajuste",
+    }), 201

@@ -1,51 +1,137 @@
-from flask import Blueprint, request, jsonify
-from flask_jwt_extended import create_access_token
+"""
+Rotas de autenticação — /api/auth
+Endpoints: POST /login, POST /cadastro, PUT /perfil
+"""
+
+import re
+import logging
 import bcrypt
-from ..models import db, Usuario
+from flask import Blueprint, request, jsonify, current_app
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
-# Criação do Blueprint para as rotas de autenticação
-auth_bp = Blueprint('auth', __name__)
+from ..models import db, Usuario, Empresa
 
-@auth_bp.route('/login', methods=['POST'])
+auth_bp = Blueprint("auth", __name__)
+logger = logging.getLogger(__name__)
+
+
+# ── Validações ─────────────────────────────────────────────────────────────
+
+def _somente_digitos(valor: str) -> str:
+    """Remove qualquer caractere não-numérico (máscaras de CPF, etc.)."""
+    return re.sub(r"\D", "", valor or "")
+
+
+def _cpf_valido(cpf: str) -> bool:
+    """
+    Valida dígitos verificadores do CPF.
+    Rejeita sequências triviais como '00000000000'.
+    """
+    cpf = _somente_digitos(cpf)
+    if len(cpf) != 11 or len(set(cpf)) == 1:
+        return False
+
+    # Primeiro dígito verificador
+    soma = sum(int(cpf[i]) * (10 - i) for i in range(9))
+    d1 = (soma * 10 % 11) % 10
+    if d1 != int(cpf[9]):
+        return False
+
+    # Segundo dígito verificador
+    soma = sum(int(cpf[i]) * (11 - i) for i in range(10))
+    d2 = (soma * 10 % 11) % 10
+    return d2 == int(cpf[10])
+
+
+# ── Login ──────────────────────────────────────────────────────────────────
+
+@auth_bp.route("/login", methods=["POST"])
 def login():
-    dados = request.get_json()
-    
-    # 1. Validação básica de entrada
-    if not dados or not dados.get('cpf') or not dados.get('senha'):
-        return jsonify({"erro": "CPF e senha corporativa são obrigatórios"}), 400
-        
-    cpf_informado = dados.get('cpf')
-    senha_informada = dados.get('senha').encode('utf-8')
-        
-    # 2. Busca o usuário no banco de dados
-    usuario = Usuario.query.filter_by(cpf=cpf_informado).first()
-    
-    # 3. Verificação de credenciais
-    # Se o usuário existir, comparamos a senha em texto puro com o hash salvo no banco
-    if usuario and bcrypt.checkpw(senha_informada, usuario.senha_hash.encode('utf-8')):
-        
-        # 4. Criação do Token JWT
-        # Embutimos o perfil e a empresa no token para facilitar as regras de negócio nas rotas protegidas
-        claims_adicionais = {
-            "perfil": usuario.perfil,       # ex: 'colaborador', 'gestor'
-            "empresa_id": usuario.empresa_id 
-        }
-        
-        # O 'identity' geralmente é a chave primária do usuário
-        token_acesso = create_access_token(
-            identity=str(usuario.id), 
-            additional_claims=claims_adicionais
-        )
-        
-        # TODO (Futuro): Registrar log de auditoria do login (IP e dispositivo)
-        ip_acesso = request.remote_addr
-        
-        # No final da sua função de login no Python:
-        return jsonify({
-            "token": token_acesso,
-            "nome": usuario.nome,
-            "perfil": usuario.perfil
-        }), 200
-        
-    # Retorno genérico para não dar dicas a invasores se o CPF existe ou não
-    return jsonify({"erro": "Credenciais inválidas"}), 401
+    """
+    Autentica o usuário com CPF e senha.
+    Retorna JWT com perfil e empresa_id nos claims adicionais.
+    """
+    dados = request.get_json(silent=True)
+
+    if not dados:
+        return jsonify({"erro": "Requisição inválida. Envie JSON."}), 400
+
+    cpf_raw   = dados.get("cpf", "")
+    senha_raw = dados.get("senha", "")
+
+    if not cpf_raw or not senha_raw:
+        return jsonify({"erro": "CPF e senha são obrigatórios."}), 400
+
+    cpf = _somente_digitos(cpf_raw)
+
+    # Busca o usuário — resposta genérica para não revelar se o CPF existe
+    usuario = Usuario.query.filter_by(cpf=cpf).first()
+
+    credenciais_validas = (
+        usuario is not None
+        and usuario.ativo
+        and bcrypt.checkpw(senha_raw.encode("utf-8"), usuario.senha_hash.encode("utf-8"))
+    )
+
+    if not credenciais_validas:
+        logger.warning(f"Tentativa de login falhou para CPF={cpf} IP={request.remote_addr}")
+        return jsonify({"erro": "CPF ou senha incorretos."}), 401
+
+    # Claims extras no token — evitam consultas ao banco a cada request protegido
+    token = create_access_token(
+        identity=str(usuario.id),
+        additional_claims={
+            "perfil":     usuario.perfil,
+            "empresa_id": usuario.empresa_id,
+        },
+    )
+
+    logger.info(f"Login bem-sucedido: usuario_id={usuario.id} perfil={usuario.perfil}")
+
+    return jsonify({
+        "token":  token,
+        "nome":   usuario.nome,
+        "perfil": usuario.perfil,
+        "foto_perfil": usuario.foto_perfil,
+    }), 200
+
+
+# ── Cadastro ───────────────────────────────────────────────────────────────
+
+@auth_bp.route("/cadastro", methods=["POST"])
+def cadastro():
+    """
+    Cria um novo usuário.
+    Requer CPF válido, senha mínima de 6 chars e confirmação de senha.
+    Associa o usuário a uma empresa padrão (id=1) para ambiente de desenvolvimento.
+    """
+    dados = request.get_json(silent=True)
+
+    if not dados:
+        return jsonify({"erro": "Requisição inválida. Envie JSON."}), 400
+
+    cpf_raw          = dados.get("cpf", "")
+    senha            = dados.get("senha", "")
+    confirmar_senha  = dados.get("confirmar_senha", "")
+
+    # ── Validações de entrada ──────────────────────────────────────────────
+    cpf = _somente_digitos(cpf_raw)
+
+    if not _cpf_valido(cpf):
+        return jsonify({"erro": "CPF inválido."}), 400
+
+    if len(senha) < 6:
+        return jsonify({"erro": "A senha deve ter no mínimo 6 caracteres."}), 400
+
+    if senha != confirmar_senha:
+        return jsonify({"erro": "As senhas não coincidem."}), 400
+
+    # ── Verifica unicidade ─────────────────────────────────────────────────
+    if Usuario.query.filter_by(cpf=cpf).first():
+        return jsonify({"erro": "CPF já cadastrado."}), 409
+
+    # ── Empresa padrão para desenvolvimento ───────────────────────────────
+    # Em produção, o cadastro deve receber empresa_id ou um código de convite.
+    empresa = Empresa.query.first()
+    if not empresa:
+        emp
