@@ -42,7 +42,6 @@ class Empresa(db.Model):
 class Usuario(db.Model):
     __tablename__ = "usuarios"
 
-<<<<<<< HEAD
     id          = db.Column(db.Integer, primary_key=True)
     empresa_id  = db.Column(db.Integer, db.ForeignKey("empresas.id"), nullable=False, index=True)
     nome        = db.Column(db.String(100), nullable=False)
@@ -52,16 +51,6 @@ class Usuario(db.Model):
     ativo       = db.Column(db.Boolean, nullable=False, default=True)
     criado_em   = db.Column(db.DateTime(timezone=True), default=now_utc, nullable=False)
     foto_perfil = db.Column(db.Text, nullable=True)
-=======
-    id         = db.Column(db.Integer, primary_key=True)
-    empresa_id = db.Column(db.Integer, db.ForeignKey("empresas.id"), nullable=False, index=True)
-    nome       = db.Column(db.String(100), nullable=False)
-    cpf        = db.Column(db.String(11), unique=True, nullable=False, index=True)
-    senha_hash = db.Column(db.String(255), nullable=False)
-    perfil     = db.Column(db.String(20), nullable=False, default="colaborador")
-    ativo      = db.Column(db.Boolean, nullable=False, default=True)
-    criado_em  = db.Column(db.DateTime(timezone=True), default=now_utc, nullable=False)
->>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
 
     empresa   = db.relationship("Empresa", back_populates="usuarios")
     registros = db.relationship("RegistroPonto", back_populates="usuario", lazy="select")
@@ -73,7 +62,6 @@ class Usuario(db.Model):
     def to_dict(self) -> dict:
         """Serialização segura — nunca inclui senha_hash."""
         return {
-<<<<<<< HEAD
             "id":          self.id,
             "nome":        self.nome,
             "cpf":         self.cpf,
@@ -81,14 +69,6 @@ class Usuario(db.Model):
             "ativo":       self.ativo,
             "empresa_id":  self.empresa_id,
             "foto_perfil": self.foto_perfil,
-=======
-            "id":         self.id,
-            "nome":       self.nome,
-            "cpf":        self.cpf,
-            "perfil":     self.perfil,
-            "ativo":      self.ativo,
-            "empresa_id": self.empresa_id,
->>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
         }
 
     def __repr__(self) -> str:
@@ -125,8 +105,4 @@ class RegistroPonto(db.Model):
         }
 
     def __repr__(self) -> str:
-<<<<<<< HEAD
         return f"<RegistroPonto {self.tipo_registro} @ {self.timestamp}>"
-=======
-        return f"<RegistroPonto {self.tipo_registro} @ {self.timestamp}>"
->>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb

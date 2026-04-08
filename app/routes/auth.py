@@ -1,21 +1,13 @@
 """
 Rotas de autenticação — /api/auth
-<<<<<<< HEAD
 Endpoints: POST /login, POST /cadastro, PUT /perfil
-=======
-Endpoints: POST /login, POST /cadastro
->>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
 """
 
 import re
 import logging
 import bcrypt
 from flask import Blueprint, request, jsonify, current_app
-<<<<<<< HEAD
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
-=======
-from flask_jwt_extended import create_access_token
->>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
 
 from ..models import db, Usuario, Empresa
 
@@ -100,10 +92,7 @@ def login():
         "token":  token,
         "nome":   usuario.nome,
         "perfil": usuario.perfil,
-<<<<<<< HEAD
         "foto_perfil": usuario.foto_perfil,
-=======
->>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
     }), 200
 
 
@@ -145,9 +134,6 @@ def cadastro():
     # Em produção, o cadastro deve receber empresa_id ou um código de convite.
     empresa = Empresa.query.first()
     if not empresa:
-<<<<<<< HEAD
-        emp
-=======
         empresa = Empresa(nome_fantasia="Nexus Desenvolvimento", cnpj="00000000000100")
         db.session.add(empresa)
         db.session.flush()  # Gera o id sem commitar
@@ -169,4 +155,3 @@ def cadastro():
     logger.info(f"Novo usuário cadastrado: cpf={cpf} empresa_id={empresa.id}")
 
     return jsonify({"mensagem": "Usuário cadastrado com sucesso!"}), 201
->>>>>>> 7c764601258a759fe80901be7c9a33233464c5cb
