@@ -1,11 +1,17 @@
+"""
+Seed do gestor.
+Executa: python seed.py
+- O usuário já deve ter se cadastrado pela tela de cadastro.
+- Este script apenas atualiza o perfil para 'gestor'.
+"""
+
 from app import create_app
 from app.models import db, Empresa, Usuario
-import bcrypt
 
 app = create_app()
 
 with app.app_context():
-    # 1. Cria uma empresa de teste se não existir
+    # Garante que existe empresa
     empresa = Empresa.query.filter_by(cnpj="00000000000100").first()
     if not empresa:
         empresa = Empresa(nome_fantasia="Nexus Corp", cnpj="00000000000100")
@@ -13,24 +19,17 @@ with app.app_context():
         db.session.commit()
         print("Empresa 'Nexus Corp' criada com sucesso!")
 
-    # 2. Cria o usuário gestor se não existir
-    cpf_teste = "12345678900"
-    usuario = Usuario.query.filter_by(cpf=cpf_teste).first()
+    cpf_gestor = "12345678900"
+    usuario = Usuario.query.filter_by(cpf=cpf_gestor).first()
     
     if not usuario:
-        senha_plana = "senha_corporativa_123"
-        # Gera o hash da senha usando bcrypt (como definimos na rota de login)
-        senha_hash = bcrypt.hashpw(senha_plana.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        
-        novo_usuario = Usuario(
-            empresa_id=empresa.id,
-            nome="Gestor Nexus",
-            cpf=cpf_teste,
-            senha_hash=senha_hash,
-            perfil="gestor"
-        )
-        db.session.add(novo_usuario)
-        db.session.commit()
-        print("Usuário gestor criado com sucesso!")
+        print(f"❌ Usuário com CPF {cpf_gestor} não encontrado.")
+        print("   Cadastre-se primeiro pela tela de cadastro do app.")
     else:
-        print("Usuário já existe no banco.")
+        if usuario.perfil != "gestor":
+            perfil_antigo = usuario.perfil
+            usuario.perfil = "gestor"
+            db.session.commit()
+            print(f"✅ Perfil atualizado: {perfil_antigo} → gestor (CPF={cpf_gestor})")
+        else:
+            print(f"ℹ️  Gestor já configurado: CPF={cpf_gestor}")

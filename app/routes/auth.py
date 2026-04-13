@@ -155,3 +155,39 @@ def cadastro():
     logger.info(f"Novo usuário cadastrado: cpf={cpf} empresa_id={empresa.id}")
 
     return jsonify({"mensagem": "Usuário cadastrado com sucesso!"}), 201
+
+
+# ── Atualizar perfil ──────────────────────────────────────────────────────
+
+@auth_bp.route("/perfil", methods=["PUT"])
+@jwt_required()
+def atualizar_perfil():
+    """
+    Permite ao próprio usuário atualizar seu nome e/ou foto de perfil.
+    """
+    usuario_id = get_jwt_identity()
+    usuario = db.session.get(Usuario, int(usuario_id))
+
+    if not usuario:
+        return jsonify({"erro": "Usuário não encontrado."}), 404
+
+    dados = request.get_json(silent=True)
+    if not dados:
+        return jsonify({"erro": "Requisição inválida. Envie JSON."}), 400
+
+    if "nome" in dados:
+        nome = dados["nome"].strip()
+        if not nome:
+            return jsonify({"erro": "O nome não pode ser vazio."}), 400
+        usuario.nome = nome
+
+    if "foto_perfil" in dados:
+        usuario.foto_perfil = dados["foto_perfil"]
+
+    db.session.commit()
+
+    return jsonify({
+        "mensagem": "Perfil atualizado com sucesso!",
+        "nome": usuario.nome,
+        "foto_perfil": usuario.foto_perfil,
+    }), 200
