@@ -10,6 +10,13 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
 from ..models import db, Usuario, Empresa
+from datetime import datetime
+
+import smtplib
+import os
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from werkzeug.security import generate_password_hash
 
 auth_bp = Blueprint("auth", __name__)
 logger = logging.getLogger(__name__)
@@ -93,6 +100,9 @@ def login():
         "nome":   usuario.nome,
         "perfil": usuario.perfil,
         "foto_perfil": usuario.foto_perfil,
+        "cidade": usuario.cidade, 
+        "celular": usuario.celular, 
+        "data_nascimento": usuario.data_nascimento.isoformat() if usuario.data_nascimento else None 
     }), 200
 
 
@@ -100,19 +110,63 @@ def login():
 
 @auth_bp.route("/cadastro", methods=["POST"])
 def cadastro():
-    """
-    Cria um novo usuário.
-    Requer CPF válido, senha mínima de 6 chars e confirmação de senha.
-    Associa o usuário a uma empresa padrão (id=1) para ambiente de desenvolvimento.
-    """
     dados = request.get_json(silent=True)
-
     if not dados:
         return jsonify({"erro": "Requisição inválida. Envie JSON."}), 400
 
     cpf_raw          = dados.get("cpf", "")
     senha            = dados.get("senha", "")
     confirmar_senha  = dados.get("confirmar_senha", "")
+    
+    # Novos dados
+    nascimento_str   = dados.get("data_nascimento")
+    cidade           = dados.get("cidade", "")
+    celular          = dados.get("celular", "")
+    email            = dados.get("email", "")
+
+    cpf = _somente_digitos(cpf_raw)
+
+    if not _cpf_valido(cpf):
+        return jsonify({"erro": "CPF inválido."}), 400
+    if len(senha) < 6:
+        return jsonify({"erro": "A senha deve ter no mínimo 6 caracteres."}), 400
+    if senha != confirmar_senha:
+        return jsonify({"erro": "As senhas não coincidem."}), 400
+    if Usuario.query.filter_by(cpf=cpf).first():
+        return jsonify({"erro": "CPF já cadastrado."}), 409
+
+    # Convertendo a data de nascimento
+    data_nasc_obj = None
+    if nascimento_str:
+        try:
+            data_nasc_obj = datetime.strptime(nascimento_str, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"erro": "Data de nascimento inválida."}), 400
+
+    empresa = Empresa.query.first()
+    if not empresa:
+        empresa = Empresa(nome_fantasia="Nexus Desenvolvimento", cnpj="00000000000100")
+        db.session.add(empresa)
+        db.session.flush() 
+
+    senha_hash = bcrypt.hashpw(senha.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    novo_usuario = Usuario(
+        nome=f"Usuário {cpf[-4:]}",
+        cpf=cpf,
+        senha_hash=senha_hash,
+        empresa_id=empresa.id,
+        perfil="colaborador",
+        data_nascimento=data_nasc_obj,
+        cidade=cidade,
+        celular=celular,
+        email=email
+    )
+
+    db.session.add(novo_usuario)
+    db.session.commit()
+
+    return jsonify({"mensagem": "Usuário cadastrado com sucesso!"}), 201
 
     # ── Validações de entrada ──────────────────────────────────────────────
     cpf = _somente_digitos(cpf_raw)
@@ -184,10 +238,85 @@ def atualizar_perfil():
     if "foto_perfil" in dados:
         usuario.foto_perfil = dados["foto_perfil"]
 
+    # ... final da sua função atualizar_perfil ...
     db.session.commit()
 
     return jsonify({
         "mensagem": "Perfil atualizado com sucesso!",
         "nome": usuario.nome,
         "foto_perfil": usuario.foto_perfil,
+        "cidade": usuario.cidade,
+        "celular": usuario.celular
     }), 200
+
+# 👇 A ROTA TEM QUE FICAR AQUI, TOTALMENTE PARA A ESQUERDA! 👇
+@auth_bp.route("/esqueci-senha", methods=["POST"])
+def esqueci_senha():
+    dados = request.get_json(silent=True)
+    email_informado = dados.get("email")
+
+    if not email_informado:
+        return jsonify({"erro": "Informe o e-mail cadastrado."}), 400
+
+    # Busca o usuário (funciona para qualquer perfil: colaborador, gestor ou supervisor)
+    usuario = Usuario.query.filter_by(email=email_informado).first()
+
+    if usuario:
+        remetente = os.getenv("EMAIL_REMETENTE")
+        senha_app = os.getenv("EMAIL_SENHA")
+        
+        # No def esqueci_senha():
+        link = f"http://localhost:5173/reset-password?token=tk_{usuario.id}"
+
+        # Configuração do e-mail
+        msg = MIMEMultipart()
+        msg['From'] = remetente
+        msg['To'] = usuario.email
+        msg['Subject'] = "Recuperacao de Senha - NEXUS"
+
+        corpo = f"Olá {usuario.nome},\n\nRecebemos um pedido para redefinir sua senha.\nClique no link abaixo:\n{link}"
+        msg.attach(MIMEText(corpo, 'plain'))
+
+        try:
+            # Conexão com o servidor do Gmail
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls() 
+            server.login(remetente, senha_app)
+            server.send_message(msg)
+            server.quit()
+            print(f"✅ E-mail enviado para: {usuario.email}")
+        except Exception as e:
+            print(f"❌ Erro no disparo: {e}")
+            return jsonify({"erro": "Falha técnica ao enviar e-mail."}), 500
+
+
+    return jsonify({"mensagem": "Se o e-mail constar em nossa base, você receberá as instruções em instantes."}), 200
+
+@auth_bp.route("/reset-senha", methods=["POST"])
+def reset_senha():
+    dados = request.get_json()
+    token = dados.get("token")  # O token que vem do link (ex: tk_1)
+    nova_senha = dados.get("nova_senha")
+
+    if not token or not nova_senha:
+        return jsonify({"erro": "Dados insuficientes."}), 400
+
+    try:
+        # Extrai o ID: se o token for "tk_1", o split('_')[1] pega o "1"
+        user_id_str = token.split('_')[1]
+        user_id = int(user_id_str)
+        
+        usuario = Usuario.query.get(user_id)
+        
+        if usuario:
+            # Gera o novo hash da senha (segurança!)
+            usuario.senha_hash = generate_password_hash(nova_senha)
+            db.session.commit()
+            return jsonify({"mensagem": "Senha alterada com sucesso!"}), 200
+        
+        return jsonify({"erro": "Usuário não encontrado."}), 404
+    except (IndexError, ValueError):
+        return jsonify({"erro": "Link de recuperação inválido ou corrompido."}), 400
+    except Exception as e:
+        print(f"Erro no reset: {e}")
+        return jsonify({"erro": "Erro interno no servidor."}), 500

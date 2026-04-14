@@ -63,16 +63,21 @@ class Usuario(db.Model):
     pontos_positivos = db.Column(db.Integer, nullable=False, default=0)
     pontos_negativos = db.Column(db.Integer, nullable=False, default=0)
 
+    
+    # NOVOS CAMPOS AQUI
+    data_nascimento = db.Column(db.Date, nullable=True)
+    cidade          = db.Column(db.String(100), nullable=True)
+    celular         = db.Column(db.String(20), nullable=True)
+    email           = db.Column(db.String(150), unique=True, nullable=False) 
+
     empresa   = db.relationship("Empresa", back_populates="usuarios")
     registros = db.relationship("RegistroPonto", back_populates="usuario", lazy="select")
 
-    # Perfis válidos
     PERFIS_VALIDOS    = ("colaborador", "gestor", "supervisor", "admin")
     PERFIS_GESTORES   = ("gestor", "admin")
     PERFIL_SUPERVISOR = "supervisor"
 
     def to_dict(self) -> dict:
-        """Serialização segura — nunca inclui senha_hash."""
         return {
             "id":          self.id,
             "nome":        self.nome,
@@ -83,6 +88,10 @@ class Usuario(db.Model):
             "foto_perfil": self.foto_perfil,
             "pontos_positivos": self.pontos_positivos,
             "pontos_negativos": self.pontos_negativos,
+            "data_nascimento": self.data_nascimento.isoformat() if self.data_nascimento else None,
+            "cidade":      self.cidade,
+            "celular":     self.celular,
+            "email":       self.email,
         }
 
     def __repr__(self) -> str:

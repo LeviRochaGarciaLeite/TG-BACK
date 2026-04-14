@@ -123,14 +123,23 @@ def gestor_editar_perfil(id_colaborador: int):
 
     if "nome" in dados:
         colaborador.nome = dados["nome"]
-
     if "foto_perfil" in dados:
         colaborador.foto_perfil = dados["foto_perfil"]
+    if "cidade" in dados:
+        colaborador.cidade = dados["cidade"]
+    if "celular" in dados:
+        colaborador.celular = dados["celular"]
+    if "perfil" in dados:
+        novo_perfil = dados["perfil"]
+        if novo_perfil in Usuario.PERFIS_VALIDOS:
+            colaborador.perfil = novo_perfil
 
     db.session.commit()
 
     return jsonify({
         "mensagem": "Perfil atualizado com sucesso",
         "nome": colaborador.nome,
-        "foto_perfil": colaborador.foto_perfil
+        "cidade": colaborador.cidade,
+        "celular": colaborador.celular,
+        "perfil": colaborador.perfil
     }), 200
