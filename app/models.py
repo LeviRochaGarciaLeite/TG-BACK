@@ -17,7 +17,6 @@ def now_utc() -> datetime:
 
 
 # ── Tabela associativa: membros de equipe ─────────────────────────────────
-# Relacionamento N:M entre Equipe e Usuario (papel de colaborador)
 equipe_membros = db.Table(
     "equipe_membros",
     db.Column("equipe_id",   db.Integer, db.ForeignKey("equipes.id"),   primary_key=True),
@@ -63,15 +62,14 @@ class Usuario(db.Model):
     pontos_positivos = db.Column(db.Integer, nullable=False, default=0)
     pontos_negativos = db.Column(db.Integer, nullable=False, default=0)
 
-    
-    # NOVOS CAMPOS AQUI
     data_nascimento = db.Column(db.Date, nullable=True)
     cidade          = db.Column(db.String(100), nullable=True)
     celular         = db.Column(db.String(20), nullable=True)
-    email           = db.Column(db.String(150), unique=True, nullable=False) 
+    email           = db.Column(db.String(150), unique=True, nullable=False)
 
-    empresa   = db.relationship("Empresa", back_populates="usuarios")
-    registros = db.relationship("RegistroPonto", back_populates="usuario", lazy="select")
+    empresa        = db.relationship("Empresa", back_populates="usuarios")
+    registros      = db.relationship("RegistroPonto", back_populates="usuario", lazy="select")
+    notificacoes   = db.relationship("Notificacao", back_populates="usuario", lazy="select")
 
     PERFIS_VALIDOS    = ("colaborador", "gestor", "supervisor", "admin")
     PERFIS_GESTORES   = ("gestor", "admin")
@@ -130,12 +128,6 @@ class RegistroPonto(db.Model):
 
 
 class Equipe(db.Model):
-    """
-    Modelo de equipe escalável (N membros por equipe, sem limite fixo).
-    Decisão arquitetural: trocamos colaborador1_id/colaborador2_id por uma
-    tabela associativa N:M. Isso permite equipes com qualquer número de
-    membros sem alterar o schema no futuro.
-    """
     __tablename__ = "equipes"
 
     id            = db.Column(db.Integer, primary_key=True)
@@ -165,3 +157,32 @@ class Equipe(db.Model):
 
     def __repr__(self) -> str:
         return f"<Equipe supervisor={self.supervisor_id}>"
+
+
+# ── Notificações ───────────────────────────────────────────────────────────
+
+class Notificacao(db.Model):
+    __tablename__ = "notificacoes"
+
+    id         = db.Column(db.Integer, primary_key=True)
+    usuario_id = db.Column(db.Integer, db.ForeignKey("usuarios.id"), nullable=False, index=True)
+    mensagem   = db.Column(db.String(300), nullable=False)
+    tipo       = db.Column(db.String(50), nullable=False)   # ex: "ponto", "equipe", "senha", "holerite"
+    tela       = db.Column(db.String(50), nullable=True)    # ex: "ponto", "equipe", "holerite", "gestao"
+    lida       = db.Column(db.Boolean, nullable=False, default=False)
+    criada_em  = db.Column(db.DateTime(timezone=True), default=now_utc, nullable=False, index=True)
+
+    usuario = db.relationship("Usuario", back_populates="notificacoes")
+
+    def to_dict(self) -> dict:
+        return {
+            "id":        self.id,
+            "mensagem":  self.mensagem,
+            "tipo":      self.tipo,
+            "tela":      self.tela,
+            "lida":      self.lida,
+            "criada_em": self.criada_em.isoformat(),
+        }
+
+    def __repr__(self) -> str:
+        return f"<Notificacao usuario={self.usuario_id} tipo={self.tipo}>"

@@ -17,6 +17,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
 from ..models import db, Usuario, Empresa
+from .notificacoes import criar_notificacao
 
 auth_bp = Blueprint("auth", __name__)
 logger = logging.getLogger(__name__)
@@ -302,6 +303,26 @@ def reset_senha():
     usuario.senha_hash = bcrypt.hashpw(
         nova_senha.encode("utf-8"), bcrypt.gensalt()
     ).decode("utf-8")
+
+    # ── Notifica o próprio usuário e os gestores da empresa ───────────────
+    criar_notificacao(
+        usuario.id,
+        "🔐 Sua senha foi alterada com sucesso.",
+        tipo="senha",
+        tela=None,
+    )
+    gestores = Usuario.query.filter(
+        Usuario.empresa_id == usuario.empresa_id,
+        Usuario.perfil.in_(["gestor", "admin"]),
+        Usuario.ativo == True,
+    ).all()
+    for gestor in gestores:
+        criar_notificacao(
+            gestor.id,
+            f"🔑 {usuario.nome} alterou a senha.",
+            tipo="senha",
+            tela=None,
+        )
 
     db.session.commit()
     logger.info(f"Senha redefinida para usuario_id={usuario.id}")

@@ -18,6 +18,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
 from ..models import db, Usuario, Equipe, equipe_membros
+from .notificacoes import criar_notificacao
 
 equipe_bp = Blueprint("equipe", __name__)
 logger = logging.getLogger(__name__)
@@ -41,10 +42,6 @@ def supervisor_required(fn):
 @jwt_required()
 @supervisor_required
 def organizar_equipe():
-    """
-    Supervisor cria ou reorganiza sua equipe.
-    Body JSON: { "membro_ids": [1, 2, ...], "nome": "Equipe Alpha" (opcional) }
-    """
     claims        = get_jwt()
     supervisor_id = int(get_jwt_identity())
     empresa_id    = claims["empresa_id"]
@@ -53,7 +50,7 @@ def organizar_equipe():
     if not dados:
         return jsonify({"erro": "Corpo da requisição inválido."}), 400
 
-    membro_ids = dados.get("membro_ids", [])
+    membro_ids  = dados.get("membro_ids", [])
     nome_equipe = dados.get("nome", None)
 
     if not isinstance(membro_ids, list) or len(membro_ids) == 0:
@@ -62,7 +59,6 @@ def organizar_equipe():
     if supervisor_id in membro_ids:
         return jsonify({"erro": "O supervisor não pode ser membro da própria equipe."}), 400
 
-    # Valida que todos os membros existem e pertencem à mesma empresa
     membros = (
         Usuario.query
         .filter(
@@ -78,7 +74,6 @@ def organizar_equipe():
             "erro": "Um ou mais membros não foram encontrados ou não pertencem à sua empresa."
         }), 404
 
-    # Verifica se algum membro já está em outra equipe como colaborador
     for membro_id in membro_ids:
         vinculo = (
             db.session.query(equipe_membros)
@@ -96,11 +91,12 @@ def organizar_equipe():
                 "erro": f"O colaborador {nome_membro} já pertence a outra equipe."
             }), 409
 
-    # Cria ou atualiza a equipe deste supervisor
     equipe = Equipe.query.filter_by(supervisor_id=supervisor_id, empresa_id=empresa_id).first()
 
+    # Get current members for notification purposes
+    membros_anteriores = set(m.id for m in equipe.membros) if equipe else set()
+
     if equipe:
-        # Limpa membros antigos e substitui
         equipe.membros = membros
         if nome_equipe is not None:
             equipe.nome = nome_equipe
@@ -112,6 +108,18 @@ def organizar_equipe():
         )
         equipe.membros = membros
         db.session.add(equipe)
+
+    # Send notifications to new members
+    supervisor = db.session.get(Usuario, supervisor_id)
+    nome_supervisor = supervisor.nome if supervisor else "Seu supervisor"
+    novos_membros = [m for m in membros if m.id not in membros_anteriores]
+    for membro in novos_membros:
+        criar_notificacao(
+            membro.id,
+            f"👥 Você foi adicionado à equipe por {nome_supervisor}.",
+            tipo="equipe",
+            tela="equipe",
+        )
 
     db.session.commit()
 
@@ -132,10 +140,6 @@ def organizar_equipe():
 @jwt_required()
 @supervisor_required
 def salvar_equipe():
-    """
-    Supervisor salva a composição atual da equipe.
-    Body JSON: { "membros_ids": [1, 2, ...] }
-    """
     claims        = get_jwt()
     supervisor_id = int(get_jwt_identity())
     empresa_id    = claims["empresa_id"]
@@ -152,7 +156,6 @@ def salvar_equipe():
     if supervisor_id in membro_ids:
         return jsonify({"erro": "O supervisor não pode ser membro da própria equipe."}), 400
 
-    # Valida membros
     membros = (
         Usuario.query
         .filter(
@@ -166,7 +169,6 @@ def salvar_equipe():
     if len(membros) != len(membro_ids):
         return jsonify({"erro": "Um ou mais membros não foram encontrados."}), 404
 
-    # Verifica conflitos com outras equipes
     for membro_id in membro_ids:
         vinculo = (
             db.session.query(equipe_membros)
@@ -184,15 +186,27 @@ def salvar_equipe():
 
     equipe = Equipe.query.filter_by(supervisor_id=supervisor_id, empresa_id=empresa_id).first()
 
+    # Get current members for notification purposes
+    membros_anteriores = set(m.id for m in equipe.membros) if equipe else set()
+
     if equipe:
         equipe.membros = membros
     else:
-        equipe = Equipe(
-            supervisor_id=supervisor_id,
-            empresa_id=empresa_id,
-        )
+        equipe = Equipe(supervisor_id=supervisor_id, empresa_id=empresa_id)
         equipe.membros = membros
         db.session.add(equipe)
+
+    # Send notifications to new members
+    supervisor = db.session.get(Usuario, supervisor_id)
+    nome_supervisor = supervisor.nome if supervisor else "Seu supervisor"
+    novos_membros = [m for m in membros if m.id not in membros_anteriores]
+    for membro in novos_membros:
+        criar_notificacao(
+            membro.id,
+            f"👥 Você foi adicionado à equipe por {nome_supervisor}.",
+            tipo="equipe",
+            tela="equipe",
+        )
 
     db.session.commit()
 
@@ -209,11 +223,6 @@ def salvar_equipe():
 @equipe_bp.route("/minha", methods=["GET"])
 @jwt_required()
 def minha_equipe():
-    """
-    Retorna a equipe do usuário logado.
-    - Supervisor: retorna a equipe que ele gerencia.
-    - Colaborador: retorna a equipe onde está como membro.
-    """
     claims     = get_jwt()
     usuario_id = int(get_jwt_identity())
     perfil     = claims.get("perfil")
@@ -225,7 +234,6 @@ def minha_equipe():
             empresa_id=empresa_id,
         ).first()
     else:
-        # Colaborador: busca equipe onde é membro
         equipe = (
             Equipe.query
             .filter(Equipe.empresa_id == empresa_id)
@@ -246,10 +254,6 @@ def minha_equipe():
 @jwt_required()
 @supervisor_required
 def equipe_do_supervisor():
-    """
-    Supervisor consulta sua equipe e a lista de colaboradores disponíveis
-    para montar/reorganizar a equipe.
-    """
     claims        = get_jwt()
     supervisor_id = int(get_jwt_identity())
     empresa_id    = claims["empresa_id"]
@@ -259,20 +263,15 @@ def equipe_do_supervisor():
         empresa_id=empresa_id,
     ).first()
 
-    # IDs já vinculados em qualquer equipe desta empresa
     ids_vinculados = set()
     for eq in Equipe.query.filter_by(empresa_id=empresa_id).all():
         ids_vinculados.add(eq.supervisor_id)
         for m in eq.membros:
             ids_vinculados.add(m.id)
 
-    # Se o supervisor já tem equipe, seus próprios membros ficam disponíveis
-    # para que ele possa reorganizá-los (remover/trocar)
     membros_da_equipe_ids = set()
     if equipe:
         membros_da_equipe_ids = {m.id for m in equipe.membros}
-        # Remove os membros da PRÓPRIA equipe do conjunto de vinculados
-        # para que apareçam como disponíveis na reorganização
         ids_vinculados -= membros_da_equipe_ids
 
     disponiveis = (
@@ -286,12 +285,10 @@ def equipe_do_supervisor():
         .all()
     )
 
-    resposta = {
+    return jsonify({
         "disponiveis": [u.to_dict() for u in disponiveis],
         "equipe": equipe.to_dict() if equipe else None,
-    }
-
-    return jsonify(resposta), 200
+    }), 200
 
 
 # ── GET /api/equipe/colaboradores-disponiveis ─────────────────────────────
@@ -300,12 +297,9 @@ def equipe_do_supervisor():
 @jwt_required()
 @supervisor_required
 def colaboradores_disponiveis():
-    """Lista colaboradores da empresa que não estão em nenhuma equipe."""
-    claims        = get_jwt()
-    supervisor_id = int(get_jwt_identity())
-    empresa_id    = claims["empresa_id"]
+    claims     = get_jwt()
+    empresa_id = claims["empresa_id"]
 
-    # IDs já vinculados em qualquer equipe desta empresa
     ids_vinculados = set()
     for eq in Equipe.query.filter_by(empresa_id=empresa_id).all():
         ids_vinculados.add(eq.supervisor_id)
@@ -335,7 +329,6 @@ def colaboradores_disponiveis():
 @jwt_required()
 @supervisor_required
 def disponiveis():
-    """Colaboradores da empresa que ainda não estão em nenhuma equipe."""
     claims     = get_jwt()
     empresa_id = claims["empresa_id"]
 
@@ -369,13 +362,10 @@ def disponiveis():
 @jwt_required()
 @supervisor_required
 def buscar_colaboradores():
-    """Busca colaboradores disponíveis por nome (que não estão em nenhuma equipe)."""
-    claims        = get_jwt()
-    supervisor_id = int(get_jwt_identity())
-    empresa_id    = claims["empresa_id"]
-    q             = request.args.get("q", "").strip()
+    claims     = get_jwt()
+    empresa_id = claims["empresa_id"]
+    q          = request.args.get("q", "").strip()
 
-    # IDs já vinculados em qualquer equipe desta empresa
     ids_vinculados = set()
     for eq in Equipe.query.filter_by(empresa_id=empresa_id).all():
         ids_vinculados.add(eq.supervisor_id)
@@ -410,7 +400,6 @@ def buscar_colaboradores():
 @jwt_required()
 @supervisor_required
 def adicionar_membro():
-    """Supervisor adiciona um colaborador à sua equipe."""
     claims        = get_jwt()
     supervisor_id = int(get_jwt_identity())
     empresa_id    = claims["empresa_id"]
@@ -434,7 +423,6 @@ def adicionar_membro():
     if not colaborador:
         return jsonify({"erro": "Colaborador não encontrado."}), 404
 
-    # Verifica se já está em outra equipe
     vinculo = (
         db.session.query(equipe_membros)
         .join(Equipe, Equipe.id == equipe_membros.c.equipe_id)
@@ -447,17 +435,24 @@ def adicionar_membro():
     if vinculo:
         return jsonify({"erro": "Colaborador já pertence a uma equipe."}), 409
 
-    # Cria equipe se não existir
     equipe = Equipe.query.filter_by(supervisor_id=supervisor_id, empresa_id=empresa_id).first()
     if not equipe:
-        equipe = Equipe(
-            supervisor_id=supervisor_id,
-            empresa_id=empresa_id,
-        )
+        equipe = Equipe(supervisor_id=supervisor_id, empresa_id=empresa_id)
         db.session.add(equipe)
         db.session.flush()
 
     equipe.membros.append(colaborador)
+
+    # ── Notificação para o colaborador ─────────────────────────────────────
+    supervisor = db.session.get(Usuario, supervisor_id)
+    nome_supervisor = supervisor.nome if supervisor else "Seu supervisor"
+    criar_notificacao(
+        colaborador_id,
+        f"👥 Você foi adicionado à equipe por {nome_supervisor}.",
+        tipo="equipe",
+        tela="equipe",
+    )
+
     db.session.commit()
 
     logger.info(f"Membro adicionado: colaborador_id={colaborador_id} equipe_id={equipe.id}")
@@ -474,7 +469,6 @@ def adicionar_membro():
 @jwt_required()
 @supervisor_required
 def remover_membro():
-    """Supervisor remove um colaborador da sua equipe."""
     claims        = get_jwt()
     supervisor_id = int(get_jwt_identity())
     empresa_id    = claims["empresa_id"]
@@ -494,6 +488,17 @@ def remover_membro():
         return jsonify({"erro": "Colaborador não faz parte da sua equipe."}), 404
 
     equipe.membros.remove(colaborador)
+
+    # ── Notificação para o colaborador ─────────────────────────────────────
+    supervisor = db.session.get(Usuario, supervisor_id)
+    nome_supervisor = supervisor.nome if supervisor else "Seu supervisor"
+    criar_notificacao(
+        colaborador_id,
+        f"⚠️ Você foi removido da equipe por {nome_supervisor}.",
+        tipo="equipe",
+        tela="equipe",
+    )
+
     db.session.commit()
 
     logger.info(f"Membro removido: colaborador_id={colaborador_id} equipe_id={equipe.id}")
