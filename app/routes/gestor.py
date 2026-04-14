@@ -150,6 +150,9 @@ def gestor_editar_perfil(id_colaborador: int):
         return jsonify({"erro": "Colaborador não encontrado."}), 404
 
     dados = request.get_json()
+    gestor_id = int(get_jwt_identity())
+    gestor = db.session.get(Usuario, gestor_id)
+    nome_gestor = gestor.nome if gestor else "Seu gestor"
 
     if "nome" in dados:
         colaborador.nome = dados["nome"]
@@ -161,8 +164,25 @@ def gestor_editar_perfil(id_colaborador: int):
         colaborador.celular = dados["celular"]
     if "perfil" in dados:
         novo_perfil = dados["perfil"]
-        if novo_perfil in Usuario.PERFIS_VALIDOS:
+        if novo_perfil in Usuario.PERFIS_VALIDOS and novo_perfil != colaborador.perfil:
+            perfil_anterior = colaborador.perfil
             colaborador.perfil = novo_perfil
+
+            # Notifica o colaborador sobre a mudança de cargo
+            criar_notificacao(
+                colaborador.id,
+                f"\U0001f3f7\ufe0f Seu cargo foi alterado de '{perfil_anterior}' para '{novo_perfil}' por {nome_gestor}.",
+                tipo="perfil",
+                tela="perfil",
+            )
+
+            # Notifica os gestores/admins da empresa
+            _notificar_gestores(
+                empresa_id,
+                f"\U0001f3f7\ufe0f O cargo de {colaborador.nome} foi alterado de '{perfil_anterior}' para '{novo_perfil}' por {nome_gestor}.",
+                tipo="perfil",
+                tela=None,
+            )
 
     db.session.commit()
 
