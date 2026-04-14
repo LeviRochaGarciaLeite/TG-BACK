@@ -24,6 +24,17 @@ equipe_bp = Blueprint("equipe", __name__)
 logger = logging.getLogger(__name__)
 
 
+def _notificar_gestores_equipe(empresa_id: int, mensagem: str, tela=None):
+    """Notifica todos os gestores/admins da empresa sobre mudança na equipe."""
+    gestores = Usuario.query.filter(
+        Usuario.empresa_id == empresa_id,
+        Usuario.perfil.in_(["gestor", "admin"]),
+        Usuario.ativo == True,
+    ).all()
+    for gestor in gestores:
+        criar_notificacao(gestor.id, mensagem, tipo="equipe", tela=tela)
+
+
 # ── Decorator: apenas supervisor ──────────────────────────────────────────
 
 def supervisor_required(fn):
@@ -120,6 +131,17 @@ def organizar_equipe():
             tipo="equipe",
             tela="equipe",
         )
+
+    # Notifica gestores sobre a organização da equipe
+    n_membros = len(membros)
+    nome_equipe_str = f' "{equipe.nome}"' if equipe.nome else ""
+    supervisor_obj = db.session.get(Usuario, supervisor_id)
+    nome_sup = supervisor_obj.nome if supervisor_obj else "Supervisor"
+    _notificar_gestores_equipe(
+        empresa_id,
+        f"\U0001f465 {nome_sup} organizou a equipe{nome_equipe_str} com {n_membros} membro(s).",
+        tela=None,
+    )
 
     db.session.commit()
 

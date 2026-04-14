@@ -11,8 +11,20 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
 from ..models import db, Usuario, RegistroPonto
+from .notificacoes import criar_notificacao
 
 gestor_bp = Blueprint("gestor", __name__)
+
+
+def _notificar_gestores(empresa_id: int, mensagem: str, tipo: str, tela=None):
+    """Envia notificação para todos os gestores/admins da empresa."""
+    gestores = Usuario.query.filter(
+        Usuario.empresa_id == empresa_id,
+        Usuario.perfil.in_(["gestor", "admin"]),
+        Usuario.ativo == True,
+    ).all()
+    for gestor in gestores:
+        criar_notificacao(gestor.id, mensagem, tipo=tipo, tela=tela)
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +97,7 @@ def historico_colaborador(id_colaborador: int):
 @gestor_required
 def ajustar_ponto(id_colaborador: int):
     claims = get_jwt()
+    gestor_id = int(get_jwt_identity())
     empresa_id = claims["empresa_id"]
 
     colaborador = _get_colaborador_da_empresa(id_colaborador, empresa_id)
@@ -92,15 +105,32 @@ def ajustar_ponto(id_colaborador: int):
         return jsonify({"erro": "Colaborador não encontrado."}), 404
 
     dados = request.get_json()
+    tipo_reg = dados.get("tipo_registro", "registro")
 
     registro = RegistroPonto(
         usuario_id=id_colaborador,
-        tipo_registro=dados.get("tipo_registro"),
+        tipo_registro=tipo_reg,
         timestamp=datetime.fromisoformat(dados.get("horario")),
         status="ajustado"
     )
-
     db.session.add(registro)
+
+    gestor = db.session.get(Usuario, gestor_id)
+    nome_gestor = gestor.nome if gestor else "Seu gestor"
+
+    criar_notificacao(
+        id_colaborador,
+        f"\U0001f550 Seu ponto ({tipo_reg}) foi ajustado por {nome_gestor}.",
+        tipo="ponto",
+        tela="ponto",
+    )
+    _notificar_gestores(
+        empresa_id,
+        f"\U0001f550 Ponto de {colaborador.nome} ({tipo_reg}) foi ajustado por {nome_gestor}.",
+        tipo="ponto",
+        tela=None,
+    )
+
     db.session.commit()
 
     return jsonify({"mensagem": "Ponto ajustado com sucesso"}), 201

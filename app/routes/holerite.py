@@ -12,6 +12,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from ..models import db, Usuario, RegistroPonto
+from .notificacoes import criar_notificacao
 
 holerite_bp = Blueprint("holerite", __name__)
 logger = logging.getLogger(__name__)
@@ -252,8 +253,39 @@ def confirmar_holerite():
     mes  = dados.get("mes", hoje.month)
     ano  = dados.get("ano", hoje.year)
 
-    # Aqui você pode salvar num modelo HoleriteConfirmacao se quiser persistir
-    # Por ora, apenas loga e retorna sucesso
+    usuario = db.session.get(Usuario, usuario_id)
+    if not usuario:
+        return jsonify({"erro": "Usuário não encontrado."}), 404
+
+    nome_meses = [
+        "Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+        "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"
+    ]
+    mes_nome = nome_meses[mes - 1] if 1 <= mes <= 12 else str(mes)
+
+    # Notifica o próprio colaborador
+    criar_notificacao(
+        usuario_id,
+        f"\U0001f4c4 Você confirmou o recebimento do holerite de {mes_nome}/{ano}.",
+        tipo="holerite",
+        tela="holerite",
+    )
+
+    # Notifica os gestores da empresa
+    gestores = Usuario.query.filter(
+        Usuario.empresa_id == usuario.empresa_id,
+        Usuario.perfil.in_(["gestor", "admin"]),
+        Usuario.ativo == True,
+    ).all()
+    for gestor in gestores:
+        criar_notificacao(
+            gestor.id,
+            f"\U0001f4c4 {usuario.nome} confirmou o holerite de {mes_nome}/{ano}.",
+            tipo="holerite",
+            tela=None,
+        )
+
+    db.session.commit()
     logger.info(f"Holerite confirmado: usuario_id={usuario_id} {mes}/{ano}")
 
     return jsonify({
