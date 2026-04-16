@@ -64,6 +64,7 @@ def create_app(config_name: str | None = None) -> Flask:
     from .routes.equipe     import equipe_bp
     from .routes.holerite   import holerite_bp
     from .routes.notificacoes import notificacoes_bp
+    from .routes.ranking    import ranking_bp
 
     app.register_blueprint(auth_bp,         url_prefix="/api/auth")
     app.register_blueprint(ponto_bp,        url_prefix="/api/ponto")
@@ -71,6 +72,7 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(equipe_bp,       url_prefix="/api/equipe")
     app.register_blueprint(holerite_bp,     url_prefix="/api/holerite")
     app.register_blueprint(notificacoes_bp, url_prefix="/api/notificacoes")
+    app.register_blueprint(ranking_bp,      url_prefix="/api/ranking")
 
     @app.route("/api/health")
     def health_check():
