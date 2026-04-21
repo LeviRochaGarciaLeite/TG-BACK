@@ -4,11 +4,12 @@ Endpoints:
   POST /registrar         — Bate o ponto (entrada, pausa_inicio, pausa_fim, saida)
   GET  /historico         — Histórico do usuário logado (com paginação)
   GET  /status-atual      — Estado atual da jornada (idle | working | paused | done)
+    GET  /resumo-dia        — Resumo da jornada com classificação por cenários
   POST /solicitar-ajuste  — Solicita ajuste manual para aprovação do gestor
 """
 
 import logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
@@ -17,6 +18,31 @@ from .notificacoes import criar_notificacao
 
 ponto_bp = Blueprint("ponto", __name__)
 logger = logging.getLogger(__name__)
+
+
+# ── Configuração dos cenários de pontuação ───────────────────────────────
+
+CENARIO_BOM = {
+    "min_conectado_seg": 6 * 3600 + 30 * 60,  # 6h30
+    "min_trabalhado_seg": 6 * 3600,           # 6h
+    "max_pausa_seg": 30 * 60,                 # 30min
+    "max_inicio_hora": 8,
+    "max_inicio_min": 30,
+    "max_pausas": 2,
+    "max_atraso_seg": 60,                     # 1min
+}
+
+CENARIO_RUIM = {
+    "min_conectado_seg": 5 * 3600 + 30 * 60,  # 5h30
+    "min_trabalhado_seg": 5 * 3600,           # 5h
+    "max_pausa_seg": 35 * 60,                 # 35min
+    "max_inicio_hora": 8,
+    "max_inicio_min": 35,
+    "max_pausas": 3,
+    "max_atraso_seg": 5 * 60,                 # 5min
+}
+
+HORARIO_ESPERADO = {"hora": 8, "minuto": 0}
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────
@@ -55,6 +81,77 @@ def _transicao_valida(estado_atual: str, novo_tipo: str) -> bool:
         "done":    [],
     }
     return novo_tipo in transicoes_permitidas.get(estado_atual, [])
+
+
+def _agora_compativel(referencia_dt: datetime | None) -> datetime:
+    """Retorna "agora" com o mesmo padrão de timezone da referência."""
+    if referencia_dt and referencia_dt.tzinfo is None:
+        return datetime.utcnow()
+    return datetime.now(timezone.utc)
+
+
+def _calcular_pontos_por_cenario(
+    conectado_seg: int,
+    trabalhado_seg: int,
+    pausa_seg: int,
+    atraso_seg: int,
+    qtd_pausas: int,
+    inicio_hora: int,
+    inicio_min: int,
+):
+    def verifica_cenario(cfg):
+        inicio_ok = (
+            inicio_hora < cfg["max_inicio_hora"]
+            or (inicio_hora == cfg["max_inicio_hora"] and inicio_min <= cfg["max_inicio_min"])
+        )
+        return (
+            conectado_seg >= cfg["min_conectado_seg"]
+            and trabalhado_seg >= cfg["min_trabalhado_seg"]
+            and pausa_seg <= cfg["max_pausa_seg"]
+            and qtd_pausas <= cfg["max_pausas"]
+            and atraso_seg <= cfg["max_atraso_seg"]
+            and inicio_ok
+        )
+
+    if verifica_cenario(CENARIO_BOM):
+        positivos = 100
+        negativos = 0
+
+        if qtd_pausas == 0:
+            positivos += 10
+        if inicio_hora < 8:
+            positivos += 5
+
+        if qtd_pausas > 1:
+            negativos += (qtd_pausas - 1) * 5
+        if atraso_seg > 0:
+            negativos += int(atraso_seg / 60 + 0.999) * 2
+
+        return "BOM", "Bom", positivos, negativos
+
+    if verifica_cenario(CENARIO_RUIM):
+        positivos = 60
+        negativos = 10
+
+        if qtd_pausas > 2:
+            negativos += (qtd_pausas - 2) * 8
+        if atraso_seg > 0:
+            negativos += int(atraso_seg / 60 + 0.999) * 4
+
+        pausa_extra = max(0, pausa_seg - CENARIO_BOM["max_pausa_seg"])
+        negativos += int(pausa_extra / 600 + 0.999) * 3
+
+        return "RUIM", "Ruim", positivos, negativos
+
+    positivos = max(0, round((trabalhado_seg / (5 * 3600)) * 40))
+    negativos = 30
+
+    if qtd_pausas > 3:
+        negativos += (qtd_pausas - 3) * 10
+    if atraso_seg > 0:
+        negativos += int(atraso_seg / 60 + 0.999) * 5
+
+    return "PIOR", "Pior", positivos, negativos
 
 
 def _notificar_gestores_do_colaborador(colaborador: Usuario, mensagem: str, tela: str):
@@ -180,8 +277,8 @@ def status_atual():
     if not registros_hoje:
         return jsonify({"estado": "idle"}), 200
 
-    agora         = datetime.now(timezone.utc)
     inicio        = registros_hoje[0].timestamp
+    agora         = _agora_compativel(inicio)
     conectado_seg = int((agora - inicio).total_seconds())
 
     pausa_seg    = 0
@@ -208,6 +305,245 @@ def status_atual():
         "trabalhado_seg": trabalhado_seg,
         "registros_hoje": [r.to_dict() for r in registros_hoje],
     }), 200
+
+
+# ── Resumo do dia ─────────────────────────────────────────────────────────
+
+@ponto_bp.route("/resumo-dia", methods=["GET"])
+@jwt_required()
+def resumo_dia():
+    """
+    Retorna o resumo da jornada do dia atual para o colaborador logado.
+    Calcula os pontos usando o sistema de cenários da empresa.
+    """
+    usuario_id = int(get_jwt_identity())
+    registros = _registros_de_hoje(usuario_id)
+
+    if not registros:
+        return jsonify({
+            "connectedTimeInSeconds": 0,
+            "workedTimeInSeconds":    0,
+            "pauseTimeInSeconds":     0,
+            "startedAt":              None,
+            "pauseCount":             0,
+            "lateTimeInSeconds":      0,
+            "positivePoints":         0,
+            "negativePoints":         0,
+            "cenario":                None,
+            "cenarioLabel":           None,
+            "cenarioColor":           None,
+        }), 200
+
+    entrada_dt = None
+    saida_dt = None
+    pausa_inicio = None
+    pausas = []
+
+    for r in registros:
+        tipo = r.tipo_registro
+        if tipo == "entrada" and entrada_dt is None:
+            entrada_dt = r.timestamp
+        elif tipo == "pausa_inicio":
+            pausa_inicio = r.timestamp
+        elif tipo == "pausa_fim" and pausa_inicio:
+            pausas.append((pausa_inicio, r.timestamp))
+            pausa_inicio = None
+        elif tipo == "saida":
+            saida_dt = r.timestamp
+
+    referencia_dt = entrada_dt or registros[0].timestamp
+    fim = saida_dt or _agora_compativel(referencia_dt)
+
+    conectado_seg = 0
+    if entrada_dt:
+        conectado_seg = int((fim - entrada_dt).total_seconds())
+
+    pausa_seg = 0
+    for inicio_p, fim_p in pausas:
+        pausa_seg += int((fim_p - inicio_p).total_seconds())
+
+    if pausa_inicio:
+        pausa_seg += int((fim - pausa_inicio).total_seconds())
+
+    trabalhado_seg = max(0, conectado_seg - pausa_seg)
+
+    atraso_seg = 0
+    if entrada_dt:
+        esperado = entrada_dt.replace(
+            hour=HORARIO_ESPERADO["hora"],
+            minute=HORARIO_ESPERADO["minuto"],
+            second=0,
+            microsecond=0,
+        )
+        diff = (entrada_dt - esperado).total_seconds()
+        atraso_seg = max(0, int(diff))
+
+    inicio_hora = entrada_dt.hour if entrada_dt else 9
+    inicio_min = entrada_dt.minute if entrada_dt else 0
+    qtd_pausas = len(pausas) + (1 if pausa_inicio else 0)
+
+    cenario, cenario_label, positivos, negativos = _calcular_pontos_por_cenario(
+        conectado_seg=conectado_seg,
+        trabalhado_seg=trabalhado_seg,
+        pausa_seg=pausa_seg,
+        atraso_seg=atraso_seg,
+        qtd_pausas=qtd_pausas,
+        inicio_hora=inicio_hora,
+        inicio_min=inicio_min,
+    )
+
+    cores_cenario = {
+        "BOM": "#00e87a",
+        "RUIM": "#f59e0b",
+        "PIOR": "#ef4444",
+    }
+
+    # ── Atualiza os pontos no banco de dados ────────────────────────────────
+    usuario = db.session.get(Usuario, usuario_id)
+    if usuario:
+        usuario.pontos_positivos = positivos
+        usuario.pontos_negativos = negativos
+        db.session.commit()
+        logger.info(f"Pontos atualizados: usuario_id={usuario_id} positivos={positivos} negativos={negativos}")
+
+    return jsonify({
+        "connectedTimeInSeconds": conectado_seg,
+        "workedTimeInSeconds":    trabalhado_seg,
+        "pauseTimeInSeconds":     pausa_seg,
+        "startedAt":              entrada_dt.isoformat() if entrada_dt else None,
+        "pauseCount":             qtd_pausas,
+        "lateTimeInSeconds":      atraso_seg,
+        "positivePoints":         positivos,
+        "negativePoints":         negativos,
+        "cenario":                cenario,
+        "cenarioLabel":           cenario_label,
+        "cenarioColor":           cores_cenario[cenario],
+    }), 200
+
+
+# ── Histórico consolidado por dia ──────────────────────────────────────────
+
+@ponto_bp.route("/historico-dias", methods=["GET"])
+@jwt_required()
+def historico_dias():
+    """
+    Retorna um resumo consolidado dos últimos N dias.
+    Parâmetros:
+      - dias: número de dias a retornar (default: 7)
+    """
+    usuario_id = int(get_jwt_identity())
+    num_dias = min(30, max(1, request.args.get("dias", 7, type=int)))
+
+    # Calcula a data de início (N dias atrás)
+    data_inicio = datetime.combine(
+        date.today() - timedelta(days=num_dias),
+        datetime.min.time()
+    ).replace(tzinfo=timezone.utc)
+
+    # Busca todos os registros do período
+    registros = (
+        RegistroPonto.query
+        .filter(
+            RegistroPonto.usuario_id == usuario_id,
+            RegistroPonto.timestamp >= data_inicio,
+            RegistroPonto.status.in_(["valido", "ajustado"]),
+        )
+        .order_by(RegistroPonto.timestamp.asc())
+        .all()
+    )
+
+    # Agrupa registros por dia
+    dias_dict = {}
+    for reg in registros:
+        data_str = reg.timestamp.date().isoformat()
+        if data_str not in dias_dict:
+            dias_dict[data_str] = []
+        dias_dict[data_str].append(reg)
+
+    # Calcula o resumo para cada dia
+    resumos = []
+    for data_str in sorted(dias_dict.keys(), reverse=True):
+        registros_dia = dias_dict[data_str]
+        
+        entrada_dt = None
+        saida_dt = None
+        pausa_inicio = None
+        pausas = []
+
+        for r in registros_dia:
+            tipo = r.tipo_registro
+            if tipo == "entrada" and entrada_dt is None:
+                entrada_dt = r.timestamp
+            elif tipo == "pausa_inicio":
+                pausa_inicio = r.timestamp
+            elif tipo == "pausa_fim" and pausa_inicio:
+                pausas.append((pausa_inicio, r.timestamp))
+                pausa_inicio = None
+            elif tipo == "saida":
+                saida_dt = r.timestamp
+
+        fim = saida_dt or datetime.now(timezone.utc)
+
+        conectado_seg = 0
+        if entrada_dt:
+            conectado_seg = int((fim - entrada_dt).total_seconds())
+
+        pausa_seg = 0
+        for inicio_p, fim_p in pausas:
+            pausa_seg += int((fim_p - inicio_p).total_seconds())
+
+        if pausa_inicio:
+            pausa_seg += int((fim - pausa_inicio).total_seconds())
+
+        trabalhado_seg = max(0, conectado_seg - pausa_seg)
+
+        atraso_seg = 0
+        if entrada_dt:
+            esperado = entrada_dt.replace(
+                hour=HORARIO_ESPERADO["hora"],
+                minute=HORARIO_ESPERADO["minuto"],
+                second=0,
+                microsecond=0,
+            )
+            diff = (entrada_dt - esperado).total_seconds()
+            atraso_seg = max(0, int(diff))
+
+        inicio_hora = entrada_dt.hour if entrada_dt else 9
+        inicio_min = entrada_dt.minute if entrada_dt else 0
+        qtd_pausas = len(pausas) + (1 if pausa_inicio else 0)
+
+        cenario, cenario_label, positivos, negativos = _calcular_pontos_por_cenario(
+            conectado_seg=conectado_seg,
+            trabalhado_seg=trabalhado_seg,
+            pausa_seg=pausa_seg,
+            atraso_seg=atraso_seg,
+            qtd_pausas=qtd_pausas,
+            inicio_hora=inicio_hora,
+            inicio_min=inicio_min,
+        )
+
+        cores_cenario = {
+            "BOM": "#00e87a",
+            "RUIM": "#f59e0b",
+            "PIOR": "#ef4444",
+        }
+
+        resumos.append({
+            "date": data_str,
+            "startedAt": entrada_dt.isoformat() if entrada_dt else None,
+            "connectedTimeInSeconds": conectado_seg,
+            "workedTimeInSeconds": trabalhado_seg,
+            "pauseTimeInSeconds": pausa_seg,
+            "pauseCount": qtd_pausas,
+            "lateTimeInSeconds": atraso_seg,
+            "positivePoints": positivos,
+            "negativePoints": negativos,
+            "cenario": cenario,
+            "cenarioLabel": cenario_label,
+            "cenarioColor": cores_cenario[cenario],
+        })
+
+    return jsonify(resumos), 200
 
 
 # ── Solicitar ajuste ───────────────────────────────────────────────────────
