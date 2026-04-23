@@ -135,8 +135,8 @@ def _calcular_status_jornada(registros: list[RegistroPonto]) -> dict:
     agora = _agora_compativel(referencia_dt)
     fim_dt = saida_dt or agora
 
-    if estado == "paused" and pausa_inicio:
-        pausa_seg += int((agora - pausa_inicio).total_seconds())
+    if pausa_inicio:
+        pausa_seg += int((fim_dt - pausa_inicio).total_seconds())
 
     conectado_seg = int((fim_dt - entrada_dt).total_seconds()) if entrada_dt else 0
     trabalhado_seg = max(0, conectado_seg - pausa_seg)

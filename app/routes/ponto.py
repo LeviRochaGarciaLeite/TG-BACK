@@ -78,7 +78,7 @@ def _transicao_valida(estado_atual: str, novo_tipo: str) -> bool:
     transicoes_permitidas = {
         "idle":    ["entrada"],
         "working": ["pausa_inicio", "saida"],
-        "paused":  ["pausa_fim"],
+        "paused":  ["pausa_fim", "saida"],
         "done":    [],
     }
     return novo_tipo in transicoes_permitidas.get(estado_atual, [])
@@ -292,9 +292,10 @@ def status_atual():
     if not registros_hoje:
         return jsonify({"estado": "idle"}), 200
 
-    inicio        = registros_hoje[0].timestamp
-    agora         = _agora_compativel(inicio)
-    conectado_seg = int((agora - inicio).total_seconds())
+    inicio = registros_hoje[0].timestamp
+    agora = _agora_compativel(inicio)
+    fim = registros_hoje[-1].timestamp if estado == "done" else agora
+    conectado_seg = int((fim - inicio).total_seconds())
 
     pausa_seg    = 0
     inicio_pausa = None
@@ -305,16 +306,15 @@ def status_atual():
             pausa_seg += int((reg.timestamp - inicio_pausa).total_seconds())
             inicio_pausa = None
 
-    if estado == "paused" and inicio_pausa:
-        pausa_seg += int((agora - inicio_pausa).total_seconds())
+    if inicio_pausa:
+        pausa_seg += int((fim - inicio_pausa).total_seconds())
 
     trabalhado_seg = max(0, conectado_seg - pausa_seg)
-    fim = registros_hoje[-1].timestamp if estado == "done" else None
 
     return jsonify({
         "estado":         estado,
         "inicio":         inicio.isoformat(),
-        "fim":            fim.isoformat() if fim else None,
+        "fim":            fim.isoformat() if estado == "done" else None,
         "conectado_seg":  conectado_seg,
         "pausa_seg":      pausa_seg,
         "trabalhado_seg": trabalhado_seg,
