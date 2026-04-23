@@ -4,13 +4,13 @@ Acesso restrito a perfis: gestor, admin.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from functools import wraps
 
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
-from ..models import db, Usuario, RegistroPonto
+from ..models import db, Usuario, RegistroPonto, Equipe
 from .notificacoes import criar_notificacao
 
 gestor_bp = Blueprint("gestor", __name__)
@@ -49,6 +49,110 @@ def _get_colaborador_da_empresa(id_colaborador: int, empresa_id: int):
     ).first()
 
 
+def _pontuacao_liquida(usuario: Usuario) -> int:
+    return (usuario.pontos_positivos or 0) - (usuario.pontos_negativos or 0)
+
+
+def _agora_compativel(referencia_dt: datetime | None) -> datetime:
+    if referencia_dt and referencia_dt.tzinfo is None:
+        return datetime.utcnow()
+    return datetime.now(timezone.utc)
+
+
+def _calcular_status_jornada(registros: list[RegistroPonto]) -> dict:
+    if not registros:
+        return {
+            "estado": "idle",
+            "inicio": None,
+            "fim": None,
+            "conectado_seg": 0,
+            "pausa_seg": 0,
+            "trabalhado_seg": 0,
+            "registros_hoje": [],
+        }
+
+    ultimo_tipo = registros[-1].tipo_registro
+    estado = {
+        "entrada": "working",
+        "pausa_inicio": "paused",
+        "pausa_fim": "working",
+        "saida": "done",
+    }.get(ultimo_tipo, "idle")
+
+    entrada_dt = None
+    saida_dt = None
+    pausa_inicio = None
+    pausa_seg = 0
+
+    for registro in registros:
+        if registro.tipo_registro == "entrada" and entrada_dt is None:
+            entrada_dt = registro.timestamp
+        elif registro.tipo_registro == "pausa_inicio":
+            pausa_inicio = registro.timestamp
+        elif registro.tipo_registro == "pausa_fim" and pausa_inicio:
+            pausa_seg += int((registro.timestamp - pausa_inicio).total_seconds())
+            pausa_inicio = None
+        elif registro.tipo_registro == "saida":
+            saida_dt = registro.timestamp
+
+    referencia_dt = entrada_dt or registros[0].timestamp
+    agora = _agora_compativel(referencia_dt)
+    fim_dt = saida_dt or agora
+
+    if estado == "paused" and pausa_inicio:
+        pausa_seg += int((agora - pausa_inicio).total_seconds())
+
+    conectado_seg = int((fim_dt - entrada_dt).total_seconds()) if entrada_dt else 0
+    trabalhado_seg = max(0, conectado_seg - pausa_seg)
+
+    return {
+        "estado": estado,
+        "inicio": entrada_dt.isoformat() if entrada_dt else None,
+        "fim": saida_dt.isoformat() if saida_dt else None,
+        "conectado_seg": conectado_seg,
+        "pausa_seg": pausa_seg,
+        "trabalhado_seg": trabalhado_seg,
+        "registros_hoje": [r.to_dict() for r in registros],
+    }
+
+
+def _usuario_com_status(usuario: Usuario, status_map: dict[int, dict]) -> dict:
+    dados = usuario.to_dict()
+    status = status_map.get(usuario.id, _calcular_status_jornada([]))
+    dados.update({
+        "status_jornada": status["estado"],
+        "inicio": status["inicio"],
+        "fim": status["fim"],
+        "conectado_seg": status["conectado_seg"],
+        "pausa_seg": status["pausa_seg"],
+        "trabalhado_seg": status["trabalhado_seg"],
+        "pontos_total": _pontuacao_liquida(usuario),
+    })
+    return dados
+
+
+def _resumo_status(usuarios: list[Usuario], status_map: dict[int, dict]) -> dict:
+    resumo = {
+        "trabalhando": 0,
+        "pausados": 0,
+        "encerrados": 0,
+        "nao_iniciaram": 0,
+    }
+
+    for usuario in usuarios:
+        estado = status_map.get(usuario.id, {}).get("estado", "idle")
+        if estado == "working":
+            resumo["trabalhando"] += 1
+        elif estado == "paused":
+            resumo["pausados"] += 1
+        elif estado == "done":
+            resumo["encerrados"] += 1
+        else:
+            resumo["nao_iniciaram"] += 1
+
+    return resumo
+
+
 # ── Listar equipe ──────────────────────────────────────────────────────────
 
 @gestor_bp.route("/equipe", methods=["GET"])
@@ -64,6 +168,113 @@ def listar_equipe():
         "empresa_id": empresa_id,
         "total_membros": len(equipe),
         "equipe": [m.to_dict() for m in equipe],
+    }), 200
+
+
+# ── Status consolidado das equipes ────────────────────────────────────────
+
+@gestor_bp.route("/equipes/status", methods=["GET"])
+@jwt_required()
+@gestor_required
+def status_equipes():
+    """
+    Retorna uma visão consolidada para o painel do gestor.
+    Evita uma requisição de histórico por colaborador no frontend.
+    """
+    claims = get_jwt()
+    empresa_id = claims["empresa_id"]
+
+    usuarios = (
+        Usuario.query
+        .filter(
+            Usuario.empresa_id == empresa_id,
+            Usuario.ativo == True,
+            Usuario.perfil.notin_(["gestor", "admin"]),
+        )
+        .all()
+    )
+
+    usuario_ids = [usuario.id for usuario in usuarios]
+    hoje_inicio = datetime.combine(date.today(), datetime.min.time()).replace(tzinfo=timezone.utc)
+
+    registros = []
+    if usuario_ids:
+        registros = (
+            RegistroPonto.query
+            .filter(
+                RegistroPonto.usuario_id.in_(usuario_ids),
+                RegistroPonto.timestamp >= hoje_inicio,
+                RegistroPonto.status.in_(["valido", "ajustado"]),
+            )
+            .order_by(RegistroPonto.usuario_id.asc(), RegistroPonto.timestamp.asc())
+            .all()
+        )
+
+    registros_por_usuario = {usuario_id: [] for usuario_id in usuario_ids}
+    for registro in registros:
+        registros_por_usuario.setdefault(registro.usuario_id, []).append(registro)
+
+    status_map = {
+        usuario_id: _calcular_status_jornada(registros_usuario)
+        for usuario_id, registros_usuario in registros_por_usuario.items()
+    }
+
+    equipes = (
+        Equipe.query
+        .filter_by(empresa_id=empresa_id)
+        .all()
+    )
+
+    ids_em_equipes = set()
+    equipes_payload = []
+
+    for equipe in equipes:
+        integrantes = []
+        if equipe.supervisor:
+            integrantes.append(equipe.supervisor)
+            ids_em_equipes.add(equipe.supervisor.id)
+
+        membros_ativos = [membro for membro in equipe.membros if membro.ativo]
+        integrantes.extend(membros_ativos)
+        ids_em_equipes.update(membro.id for membro in membros_ativos)
+
+        equipes_payload.append({
+            "id": equipe.id,
+            "nome": equipe.nome,
+            "supervisor_id": equipe.supervisor_id,
+            "supervisor": _usuario_com_status(equipe.supervisor, status_map) if equipe.supervisor else None,
+            "membros": [_usuario_com_status(membro, status_map) for membro in membros_ativos],
+            "pontos_total": sum(_pontuacao_liquida(usuario) for usuario in integrantes),
+        })
+
+    sem_equipe = [
+        usuario
+        for usuario in usuarios
+        if usuario.id not in ids_em_equipes
+    ]
+
+    if sem_equipe:
+        equipes_payload.append({
+            "id": "sem-equipe",
+            "nome": "Sem equipe",
+            "supervisor_id": None,
+            "supervisor": None,
+            "membros": [_usuario_com_status(usuario, status_map) for usuario in sem_equipe],
+            "pontos_total": sum(_pontuacao_liquida(usuario) for usuario in sem_equipe),
+        })
+
+    colaboradores_payload = [
+        _usuario_com_status(usuario, status_map)
+        for usuario in usuarios
+    ]
+
+    return jsonify({
+        "empresa_id": empresa_id,
+        "atualizado_em": datetime.now(timezone.utc).isoformat(),
+        "resumo": _resumo_status(usuarios, status_map),
+        "total_colaboradores": len(usuarios),
+        "colaboradores": colaboradores_payload,
+        "equipes": equipes_payload,
     }), 200
 
 

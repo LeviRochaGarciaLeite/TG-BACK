@@ -221,12 +221,16 @@ def registrar_ponto():
 
     # ── Notificações de ponto ──────────────────────────────────────────────
     colaborador = db.session.get(Usuario, usuario_id)
-    if colaborador and tipo in ("entrada", "saida"):
-        if tipo == "entrada":
-            msg = f"🟢 {colaborador.nome} começou a trabalhar."
-        else:
-            msg = f"🔴 {colaborador.nome} encerrou o ponto."
-        _notificar_gestores_do_colaborador(colaborador, msg, tela="gestao")
+    if colaborador:
+        mensagens_ponto = {
+            "entrada": f"🟢 {colaborador.nome} começou a trabalhar.",
+            "pausa_inicio": f"🟡 {colaborador.nome} iniciou uma pausa.",
+            "pausa_fim": f"🟢 {colaborador.nome} voltou da pausa.",
+            "saida": f"🔴 {colaborador.nome} encerrou o ponto.",
+        }
+        msg = mensagens_ponto.get(tipo)
+        if msg:
+            _notificar_gestores_do_colaborador(colaborador, msg, tela="gestao")
 
     db.session.commit()
 
