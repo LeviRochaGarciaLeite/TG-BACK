@@ -4,16 +4,52 @@ Acesso restrito a perfis: gestor, admin.
 """
 
 import logging
+import json
+import queue
+import threading
+import time
 from datetime import datetime, timezone, date
 from functools import wraps
 
-from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
+from flask import Blueprint, request, jsonify, Response, stream_with_context
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity, decode_token
 
 from ..models import db, Usuario, RegistroPonto, Equipe
 from .notificacoes import criar_notificacao
 
 gestor_bp = Blueprint("gestor", __name__)
+
+_gestor_sse_clients: dict[int, list[queue.Queue]] = {}
+_gestor_sse_lock = threading.Lock()
+
+
+def _register_gestor_stream(empresa_id: int) -> queue.Queue:
+    q: queue.Queue = queue.Queue(maxsize=50)
+    with _gestor_sse_lock:
+        _gestor_sse_clients.setdefault(empresa_id, []).append(q)
+    return q
+
+
+def _unregister_gestor_stream(empresa_id: int, q: queue.Queue) -> None:
+    with _gestor_sse_lock:
+        clientes = _gestor_sse_clients.get(empresa_id, [])
+        if q in clientes:
+            clientes.remove(q)
+        if not clientes:
+            _gestor_sse_clients.pop(empresa_id, None)
+
+
+def push_gestor_event(empresa_id: int, payload: dict) -> None:
+    """Envia um evento leve para os painéis de gestão conectados."""
+    msg = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    with _gestor_sse_lock:
+        queues = list(_gestor_sse_clients.get(empresa_id, []))
+
+    for q in queues:
+        try:
+            q.put_nowait(msg)
+        except queue.Full:
+            pass
 
 
 def _notificar_gestores(empresa_id: int, mensagem: str, tipo: str, tela=None):
@@ -169,6 +205,56 @@ def listar_equipe():
         "total_membros": len(equipe),
         "equipe": [m.to_dict() for m in equipe],
     }), 200
+
+
+# ── Stream em tempo real para o painel de equipes ─────────────────────────
+
+@gestor_bp.route("/equipes/stream", methods=["GET"])
+def stream_equipes():
+    """
+    SSE leve para avisar o gestor quando algum ponto mudar.
+    O payload não carrega a equipe inteira; o frontend busca /equipes/status.
+    """
+    raw_token = request.args.get("token", "")
+    if not raw_token:
+        return jsonify({"erro": "Token ausente."}), 401
+
+    try:
+        decoded = decode_token(raw_token)
+        perfil = decoded.get("perfil")
+        empresa_id = int(decoded["empresa_id"])
+    except Exception:
+        return jsonify({"erro": "Token inválido."}), 401
+
+    if perfil not in Usuario.PERFIS_GESTORES:
+        return jsonify({"erro": "Acesso negado. Restrito a gestores."}), 403
+
+    q = _register_gestor_stream(empresa_id)
+
+    @stream_with_context
+    def generate():
+        yield f"data: {json.dumps({'tipo': '__connected__', 'empresa_id': empresa_id})}\n\n"
+
+        while True:
+            try:
+                msg = q.get(timeout=20)
+                yield msg
+            except queue.Empty:
+                yield f": heartbeat {int(time.time())}\n\n"
+            except GeneratorExit:
+                break
+
+        _unregister_gestor_stream(empresa_id, q)
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ── Status consolidado das equipes ────────────────────────────────────────

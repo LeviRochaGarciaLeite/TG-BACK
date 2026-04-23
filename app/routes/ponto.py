@@ -14,6 +14,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from ..models import db, RegistroPonto, Usuario, Equipe
+from .gestor import push_gestor_event
 from .notificacoes import criar_notificacao
 
 ponto_bp = Blueprint("ponto", __name__)
@@ -233,6 +234,16 @@ def registrar_ponto():
             _notificar_gestores_do_colaborador(colaborador, msg, tela="gestao")
 
     db.session.commit()
+
+    if colaborador:
+        push_gestor_event(colaborador.empresa_id, {
+            "tipo": "ponto_atualizado",
+            "colaborador_id": colaborador.id,
+            "nome": colaborador.nome,
+            "registro": tipo,
+            "novo_estado": _estado_jornada(_registros_de_hoje(usuario_id)),
+            "horario": novo.timestamp.isoformat(),
+        })
 
     logger.info(f"Ponto registrado: usuario_id={usuario_id} tipo={tipo}")
 
