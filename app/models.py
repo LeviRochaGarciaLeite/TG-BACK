@@ -186,3 +186,32 @@ class Notificacao(db.Model):
 
     def __repr__(self) -> str:
         return f"<Notificacao usuario={self.usuario_id} tipo={self.tipo}>"
+
+
+# ── Mensagens de Chat ──────────────────────────────────────────────────────
+
+class MensagemChat(db.Model):
+    __tablename__ = "mensagens_chat"
+
+    id               = db.Column(db.Integer, primary_key=True)
+    remetente_id     = db.Column(db.Integer, db.ForeignKey("usuarios.id"), nullable=False, index=True)
+    destinatario_id  = db.Column(db.Integer, db.ForeignKey("usuarios.id"), nullable=False, index=True)
+    texto            = db.Column(db.Text, nullable=False)
+    lida             = db.Column(db.Boolean, nullable=False, default=False)
+    criada_em        = db.Column(db.DateTime(timezone=True), default=now_utc, nullable=False, index=True)
+
+    remetente     = db.relationship("Usuario", foreign_keys=[remetente_id])
+    destinatario  = db.relationship("Usuario", foreign_keys=[destinatario_id])
+
+    def to_dict(self) -> dict:
+        return {
+            "id":               self.id,
+            "remetente_id":     self.remetente_id,
+            "destinatario_id":  self.destinatario_id,
+            "texto":            self.texto,
+            "lida":             self.lida,
+            "criada_em":        self.criada_em.isoformat(),
+        }
+
+    def __repr__(self) -> str:
+        return f"<MensagemChat de={self.remetente_id} para={self.destinatario_id}>"

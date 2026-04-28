@@ -1,11 +1,16 @@
 from dotenv import load_dotenv
-from app import create_app
+from app import create_app, socketio
 
-# Carrega variáveis de ambiente do arquivo .env
 load_dotenv()
 
 app = create_app()
 
 if __name__ == '__main__':
-    # threaded=True é obrigatório para SSE funcionar (cada cliente fica em uma thread)
-    app.run(debug=True, host='127.0.0.1', port=5000, threaded=True)
+    # socketio.run() substitui app.run() — suporta WebSocket
+    socketio.run(
+        app,
+        debug=True,
+        host='127.0.0.1',
+        port=5000,
+        allow_unsafe_werkzeug=True,
+    )

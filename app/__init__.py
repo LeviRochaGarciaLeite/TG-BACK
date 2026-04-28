@@ -7,9 +7,13 @@ import logging
 from flask import Flask, jsonify
 from flask_jwt_extended import JWTManager
 from flask_cors import CORS
+from flask_socketio import SocketIO
 
 from .models import db
 from .config import config_map
+
+# SocketIO global — importado pelos módulos de socket
+socketio = SocketIO()
 
 
 def create_app(config_name: str | None = None) -> Flask:
@@ -27,6 +31,15 @@ def create_app(config_name: str | None = None) -> Flask:
     CORS(app, origins=app.config.get("CORS_ORIGINS", "*"))
     db.init_app(app)
     jwt = JWTManager(app)
+
+    # Inicializa SocketIO com CORS liberado e modo threading
+    socketio.init_app(
+        app,
+        cors_allowed_origins="*",
+        async_mode="threading",
+        logger=False,
+        engineio_logger=False,
+    )
 
     @jwt.unauthorized_loader
     def missing_token_callback(reason):
@@ -57,14 +70,15 @@ def create_app(config_name: str | None = None) -> Flask:
         app.logger.error(f"Erro interno: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor."}), 500
 
-    # ── Blueprints ─────────────────────────────────────────────────────────
-    from .routes.auth       import auth_bp
-    from .routes.ponto      import ponto_bp
-    from .routes.gestor     import gestor_bp
-    from .routes.equipe     import equipe_bp
-    from .routes.holerite   import holerite_bp
+    # ── Blueprints REST ────────────────────────────────────────────────────
+    from .routes.auth         import auth_bp
+    from .routes.ponto        import ponto_bp
+    from .routes.gestor       import gestor_bp
+    from .routes.equipe       import equipe_bp
+    from .routes.holerite     import holerite_bp
     from .routes.notificacoes import notificacoes_bp
-    from .routes.ranking    import ranking_bp
+    from .routes.ranking      import ranking_bp
+    from .routes.chat         import chat_bp
 
     app.register_blueprint(auth_bp,         url_prefix="/api/auth")
     app.register_blueprint(ponto_bp,        url_prefix="/api/ponto")
@@ -73,10 +87,14 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(holerite_bp,     url_prefix="/api/holerite")
     app.register_blueprint(notificacoes_bp, url_prefix="/api/notificacoes")
     app.register_blueprint(ranking_bp,      url_prefix="/api/ranking")
+    app.register_blueprint(chat_bp,         url_prefix="/api/chat")
+
+    # ── Eventos WebSocket ──────────────────────────────────────────────────
+    from .routes import socket_events  # noqa: F401 — registra os handlers
 
     @app.route("/api/health")
     def health_check():
-        return jsonify({"status": "ok", "versao": "1.1.0"}), 200
+        return jsonify({"status": "ok", "versao": "1.2.0"}), 200
 
     with app.app_context():
         db.create_all()
